@@ -27,14 +27,14 @@ use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use libbpf_sys::bpf_enable_stats;
+// use libbpf_sys::bpf_enable_stats;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{
     Axis, Block, BorderType, Borders, Cell, Chart, Dataset, GraphType, Padding, Paragraph, Row,
-    Table,
+    Table, TableState,
 };
 use ratatui::{symbols, Frame, Terminal};
 
@@ -71,18 +71,18 @@ impl From<&BpfProgram> for Row<'_> {
 }
 
 fn main() -> Result<()> {
-    if !running_as_root() {
-        return Err(anyhow!("This program must be run as root"));
-    }
+    // if !running_as_root() {
+    //     return Err(anyhow!("This program must be run as root"));
+    // }
 
     // Try to enable BPF stats
-    let fd = unsafe { bpf_enable_stats(libbpf_sys::BPF_STATS_RUN_TIME) };
-    if fd < 0 {
-        return Err(anyhow!("Failed to enable BPF stats"));
-    }
-    // The file descriptor will be closed when `_owned_fd` goes out of scope.
-    // This guarantees that BPF stats will be disabled when the program exits.
-    let _owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // let fd = unsafe { bpf_enable_stats(libbpf_sys::BPF_STATS_RUN_TIME) };
+    // if fd < 0 {
+    //     return Err(anyhow!("Failed to enable BPF stats"));
+    // }
+    // // The file descriptor will be closed when `_owned_fd` goes out of scope.
+    // // This guarantees that BPF stats will be disabled when the program exits.
+    // let _owned_fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
     // setup terminal
     enable_raw_mode()?;
@@ -113,13 +113,17 @@ fn main() -> Result<()> {
 
 fn run_draw_loop<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result<()> {
     loop {
+        // receive updates
+        app.ingest_updates();
+
+        // draw the UI
         terminal.draw(|f| ui(f, &mut app))?;
 
         // wait up to 100ms for a keyboard event
         if poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Down | KeyCode::Char('j')=> {
+                    KeyCode::Down | KeyCode::Char('j') => {
                         if !app.show_graphs {
                             app.next_program()
                         }
@@ -141,7 +145,7 @@ fn run_draw_loop<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> Result
                     _ => {}
                 }
                 if let (KeyModifiers::CONTROL, KeyCode::Char('c')) = (key.modifiers, key.code) {
-                    return Ok(())
+                    return Ok(());
                 }
             }
         }
@@ -340,16 +344,19 @@ fn render_graphs(f: &mut Frame, app: &mut App, area: Rect) {
         items = vec![
             Row::new(vec![
                 Cell::from("Program ID".bold()),
-                Cell::from(bpf_program.id),
-            ]).height(2),
+                Cell::from(&*bpf_program.id),
+            ])
+            .height(2),
             Row::new(vec![
                 Cell::from("Program Type".bold()),
-                Cell::from(bpf_program.bpf_type),
-            ]).height(2),
+                Cell::from(&*bpf_program.bpf_type),
+            ])
+            .height(2),
             Row::new(vec![
                 Cell::from("Program Name".bold()),
-                Cell::from(bpf_program.name),
-            ]).height(2),
+                Cell::from(&*bpf_program.name),
+            ])
+            .height(2),
         ];
     }
 
@@ -368,7 +375,7 @@ fn render_graphs(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(runtime_chart, sub_chunks[1][1]); // Bottom right
 }
 
-fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
+fn render_table(f: &mut Frame, app: &App, area: Rect) {
     let selected_style = Style::default().add_modifier(Modifier::REVERSED);
     let normal_style = Style::default().bg(Color::Blue);
     let header = Row::new(HEADER_COLS)
@@ -376,9 +383,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         .height(1)
         .bottom_margin(1);
 
-    let items = app.items.lock().unwrap();
-
-    let rows: Vec<Row> = items.iter().map(|item| item.into()).collect();
+    let rows: Vec<Row> = app.items.iter().map(|item| item.into()).collect();
 
     let widths = [
         Constraint::Percentage(5),
@@ -399,7 +404,8 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .highlight_style(selected_style)
         .highlight_symbol(">> ");
-    f.render_stateful_widget(t, area, &mut app.state.lock().unwrap());
+    let mut fake_state = TableState::new().with_selected(*app.maybe_selected_index);
+    f.render_stateful_widget(t, area, &mut fake_state);
 }
 
 fn render_footer(f: &mut Frame, app: &mut App, area: Rect) {

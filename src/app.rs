@@ -17,25 +17,39 @@
  */
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use circular_buffer::CircularBuffer;
-use libbpf_rs::query::ProgInfoIter;
+// use libbpf_rs::query::ProgInfoIter;
 use ratatui::widgets::TableState;
 
 use crate::bpf_program::BpfProgram;
 
 pub struct App {
-    pub state: Arc<Mutex<TableState>>,
-    pub items: Arc<Mutex<Vec<BpfProgram>>>,
+    pub maybe_selected_index: Arc<Option<usize>>,
+    pub items: Arc<Vec<BpfProgram>>,
+
+    pub items_tx: Sender<BpfProgram>,
+    pub items_rx: Receiver<BpfProgram>,
+    selected_tx: Sender<StateUpdate>,
+    selected_rx: Receiver<StateUpdate>,
+
     pub data_buf: Arc<Mutex<CircularBuffer<20, PeriodMeasure>>>,
     pub show_graphs: bool,
     pub max_cpu: f64,
     pub max_eps: i64,
     pub max_runtime: u64,
+}
+
+enum StateUpdate {
+    Select(usize),
+    Deselect,
 }
 
 pub struct PeriodMeasure {
@@ -46,9 +60,17 @@ pub struct PeriodMeasure {
 
 impl App {
     pub fn new() -> App {
+        let (items_tx, items_rx) = channel();
+        let (selected_tx, selected_rx) = channel();
+
         App {
-            state: Arc::new(Mutex::new(TableState::default())),
-            items: Arc::new(Mutex::new(vec![])),
+            maybe_selected_index: Arc::new(None),
+            selected_tx,
+            selected_rx,
+            items: Arc::new(Vec::new()),
+            items_tx,
+            items_rx,
+
             data_buf: Arc::new(Mutex::new(CircularBuffer::<20, PeriodMeasure>::new())),
             show_graphs: false,
             max_cpu: 0.0,
@@ -57,61 +79,88 @@ impl App {
         }
     }
 
+    pub(crate) fn ingest_updates(&mut self) {
+        if let Some(latest_value) = self.selected_rx.try_iter().last() {
+            if let Some(selected_ref) = Arc::get_mut(&mut self.maybe_selected_index) {
+                *selected_ref = match latest_value {
+                    StateUpdate::Select(index) => Some(index),
+                    StateUpdate::Deselect => None,
+                };
+            }
+        }
+
+        self.items = Arc::new(self.items_rx.try_iter().collect());
+    }
+
+    pub(crate) fn deselect(&self) {
+        if let Err(why) = self.selected_tx.send(StateUpdate::Deselect) {
+            eprintln!("Failed to deselect: {:?}", &why);
+        }
+    }
+
+    pub(crate) fn select(&self, index: usize) {
+        if let Err(why) = self.selected_tx.send(StateUpdate::Select(index)) {
+            eprintln!("Failed to select: {:?}", &why);
+        }
+    }
+
     pub fn start_background_thread(&self) {
         let items = Arc::clone(&self.items);
         let data_buf = Arc::clone(&self.data_buf);
-        let state = Arc::clone(&self.state);
+        let selected = Arc::clone(&self.maybe_selected_index);
+
+        let selected_tx = self.selected_tx.clone();
 
         thread::spawn(move || loop {
             let loop_start = Instant::now();
 
-            let mut items = items.lock().unwrap();
-            let map: HashMap<String, BpfProgram> = items
-                .drain(..)
-                .map(|prog| (prog.id.clone(), prog))
-                .collect();
+            // let mut items = items.lock().unwrap();
+            // let map: HashMap<String, BpfProgram> = items
+            //     .drain(..)
+            //     .map(|prog| (prog.id.clone(), prog))
+            //     .collect();
 
-            let iter = ProgInfoIter::default();
-            for prog in iter {
-                let instant = Instant::now();
+            // let iter = ProgInfoIter::default();
+            // for prog in iter {
+            //     let instant = Instant::now();
 
-                let prog_name = match prog.name.to_str() {
-                    Ok(name) => name.to_string(),
-                    Err(_) => continue,
-                };
+            //     let prog_name = match prog.name.to_str() {
+            //         Ok(name) => name.to_string(),
+            //         Err(_) => continue,
+            //     };
 
-                if prog_name.is_empty() {
-                    continue;
-                }
+            //     if prog_name.is_empty() {
+            //         continue;
+            //     }
 
-                let mut bpf_program = BpfProgram {
-                    id: prog.id.to_string(),
-                    bpf_type: prog.ty.to_string(),
-                    name: prog_name,
-                    prev_runtime_ns: 0,
-                    run_time_ns: prog.run_time_ns,
-                    prev_run_cnt: 0,
-                    run_cnt: prog.run_cnt,
-                    instant,
-                    period_ns: 0,
-                };
+            //     let mut bpf_program = BpfProgram {
+            //         id: prog.id.to_string(),
+            //         bpf_type: prog.ty.to_string(),
+            //         name: prog_name,
+            //         prev_runtime_ns: 0,
+            //         run_time_ns: prog.run_time_ns,
+            //         prev_run_cnt: 0,
+            //         run_cnt: prog.run_cnt,
+            //         instant,
+            //         period_ns: 0,
+            //     };
 
-                if let Some(prev_bpf_program) = map.get(&bpf_program.id) {
-                    bpf_program.prev_runtime_ns = prev_bpf_program.run_time_ns;
-                    bpf_program.prev_run_cnt = prev_bpf_program.run_cnt;
-                    bpf_program.period_ns = prev_bpf_program.instant.elapsed().as_nanos();
-                }
+            //     if let Some(prev_bpf_program) = map.get(&bpf_program.id) {
+            //         bpf_program.prev_runtime_ns = prev_bpf_program.run_time_ns;
+            //         bpf_program.prev_run_cnt = prev_bpf_program.run_cnt;
+            //         bpf_program.period_ns = prev_bpf_program.instant.elapsed().as_nanos();
+            //     }
 
-                items.push(bpf_program);
-            }
+            //     items.push(bpf_program);
+            // }
 
-            let mut state = state.lock().unwrap();
             let mut data_buf = data_buf.lock().unwrap();
-            if let Some(index) = state.selected() {
+            if let Some(index) = *selected {
                 // If the selected index is out of bounds, unselect it.
                 // This can happen if a program exits while it's selected.
                 if index >= items.len() {
-                    state.select(None);
+                    selected_tx.send(StateUpdate::Deselect);
+                    // state.select(None);
                     continue;
                 }
 
@@ -124,9 +173,7 @@ impl App {
             }
 
             // Explicitly drop the MutexGuards to unlock before sleeping.
-            drop(items);
             drop(data_buf);
-            drop(state);
 
             // Adjust sleep duration to maintain a 1-second sample period, accounting for loop processing time.
             let elapsed = loop_start.elapsed();
@@ -147,19 +194,16 @@ impl App {
         self.show_graphs = !self.show_graphs;
     }
 
-    pub fn selected_program(&self) -> Option<BpfProgram> {
-        let items = self.items.lock().unwrap();
-        let state = self.state.lock().unwrap();
-
-        state.selected().map(|i| items[i].clone())
+    pub fn selected_program(&self) -> Option<&BpfProgram> {
+        self.maybe_selected_index
+            .and_then(|index| self.items.get(index))
     }
-    pub fn next_program(&mut self) {
-        let items = self.items.lock().unwrap();
-        if items.len() > 0 {
-            let mut state = self.state.lock().unwrap();
-            let i = match state.selected() {
+
+    pub fn next_program(&self) {
+        if self.items.len() > 0 {
+            let i = match *self.maybe_selected_index {
                 Some(i) => {
-                    if i >= items.len() - 1 {
+                    if i >= self.items.len() - 1 {
                         0
                     } else {
                         i + 1
@@ -167,25 +211,25 @@ impl App {
                 }
                 None => 0,
             };
-            state.select(Some(i));
+
+            self.select(i);
         }
     }
 
-    pub fn previous_program(&mut self) {
-        let items = self.items.lock().unwrap();
-        if items.len() > 0 {
-            let mut state = self.state.lock().unwrap();
-            let i = match state.selected() {
+    pub fn previous_program(&self) {
+        if self.items.len() > 0 {
+            let i = match *self.maybe_selected_index {
                 Some(i) => {
                     if i == 0 {
-                        items.len() - 1
+                        self.items.len() - 1
                     } else {
                         i - 1
                     }
                 }
-                None => items.len() - 1,
+                None => self.items.len() - 1,
             };
-            state.select(Some(i));
+
+            self.select(i);
         }
     }
 }
